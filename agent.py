@@ -148,27 +148,52 @@ JSON only, no text.""")
 
     # Step 2: Modify app.py
     if 'app.py' in plan.get('files_to_modify', []):
-        new_code = ai(f"""{CONTEXT}
+        # Send only last part of app.py to avoid token limits
+        app_snippet = app_content[-3000:] if len(app_content) > 3000 else app_content
 
-CURRENT app.py:
-{app_content}
+        new_code = ai(f"""{CONTEXT}
 
 TASK: {command}
 
-Return COMPLETE updated app.py.
-Add comment: # GHOST AGENT [{ts}]: {command[:50]}
-Python code only, no markdown.""")
+Here is the END of the current app.py (add new code AFTER this):
+{app_snippet}
+
+Instructions:
+1. Return ONLY the new code to APPEND at the end of app.py
+2. Do NOT return the full file
+3. Add comment: # GHOST AGENT [{ts}]: {command[:50]}
+4. Python code only, no markdown
+5. Keep it minimal — just the new route/function""")
 
         if not new_code:
             return {"success": False, "message": "AI could not generate code, Sir."}
 
         new_code = clean_code(new_code)
-        ok, resp = gh_put('app.py', new_code, app_sha,
+
+        # Append new code to existing app.py
+        # Remove the last line (if __name__ == '__main__':) and re-add after new code
+        lines = app_content.rstrip().split('\n')
+        # Find and preserve the if __name__ block at end
+        main_block = []
+        content_lines = lines
+        for i in range(len(lines)-1, -1, -1):
+            if "if __name__" in lines[i]:
+                main_block = lines[i:]
+                content_lines = lines[:i]
+                break
+
+        updated_app = '\n'.join(content_lines) + '\n\n' + new_code
+        if main_block:
+            updated_app += '\n\n' + '\n'.join(main_block)
+
+        ok, resp = gh_put('app.py', updated_app, app_sha,
                           f"Ghost Agent: {command[:60]} [{ts}]")
         if ok:
             results.append("app.py updated ✅")
         else:
-            return {"success": False, "message": f"GitHub error: {resp.get('message', 'Unknown')}"}
+            error_msg = resp.get('message', 'Unknown') if isinstance(resp, dict) else str(resp)
+            print(f"GitHub put error: {error_msg}")
+            return {"success": False, "message": f"GitHub error: {error_msg}, Sir."}
 
     # Step 3: Create new templates
     for f in plan.get('files_to_create', []):
