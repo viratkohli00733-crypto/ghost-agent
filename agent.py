@@ -19,11 +19,15 @@ CLAUDE_API_KEY = os.environ.get('CLAUDE_API_KEY', '')
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
 CLAUDE_URL = "https://api.anthropic.com/v1/messages"
 GITHUB_API = "https://api.github.com"
-GH_HEADERS = {
-    "Authorization": f"token {GITHUB_TOKEN}",
-    "Accept": "application/vnd.github.v3+json",
-    "Content-Type": "application/json"
-}
+
+def _gh_headers():
+    """Always fresh headers — reads env var at call time."""
+    token = os.environ.get('GITHUB_TOKEN', GITHUB_TOKEN)
+    return {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json",
+        "Content-Type": "application/json"
+    }
 
 CONTEXT = """You are an expert Flask developer on StylStation — a barbershop booking platform.
 
@@ -42,7 +46,7 @@ STRUCTURE: app.py (all routes), templates/, static/, requirements.txt"""
 
 def gh_get(filepath):
     url = f"{GITHUB_API}/repos/{GITHUB_REPO}/contents/{filepath}?ref={GITHUB_BRANCH}"
-    r = requests.get(url, headers=GH_HEADERS, timeout=15)
+    r = requests.get(url, headers=_gh_headers(), timeout=15)
     if r.status_code == 200:
         d = r.json()
         return base64.b64decode(d['content']).decode('utf-8'), d['sha']
@@ -56,12 +60,12 @@ def gh_put(filepath, content, sha, message):
         "branch": GITHUB_BRANCH
     }
     if sha: payload["sha"] = sha
-    r = requests.put(url, headers=GH_HEADERS, json=payload, timeout=15)
+    r = requests.put(url, headers=_gh_headers(), json=payload, timeout=15)
     return r.status_code in [200, 201], r.json()
 
 def gh_list(path=""):
     url = f"{GITHUB_API}/repos/{GITHUB_REPO}/contents/{path}?ref={GITHUB_BRANCH}"
-    r = requests.get(url, headers=GH_HEADERS, timeout=15)
+    r = requests.get(url, headers=_gh_headers(), timeout=15)
     return [f['path'] for f in r.json()] if r.status_code == 200 else []
 
 
@@ -237,4 +241,4 @@ def status():
 
 if __name__ == '__main__':
     app.run(debug=False, host='0.0.0.0', port=int(os.environ.get('PORT', 5001)))
-  
+    
