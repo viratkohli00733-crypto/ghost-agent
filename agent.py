@@ -147,9 +147,38 @@ def render_get_deploys(service_id, limit=5):
     return []
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  AI — Claude first, Gemini fallback
+#  AI — Qwen (phone) first, Claude/Gemini only if explicitly permitted
+#  model_hint: 'qwen' | 'claude' | 'gemini' | 'auto'
+#  'auto' = try Claude first, then Gemini (cloud-only path, use after permission)
 # ══════════════════════════════════════════════════════════════════════════════
+QWEN_URL_AGENT = os.environ.get('QWEN_URL', '')   # e.g. http://phone-ip:8080/completion
+
+def ai_call_qwen(prompt, max_tokens=4096):
+    """Call Qwen Coder-3B running on phone via llama-server."""
+    if not QWEN_URL_AGENT:
+        return None, None
+    try:
+        r = requests.post(
+            QWEN_URL_AGENT,
+            json={"prompt": prompt, "n_predict": max_tokens, "temperature": 0.2,
+                  "stop": ["```\n\nTask:", "===END==="]},
+            timeout=120)
+        if r.status_code == 200:
+            content = r.json().get('content', '').strip()
+            if content:
+                return content, 'qwen'
+    except Exception as e:
+        print(f"Qwen Agent: {e}")
+    return None, None
+
 def ai_call(prompt, model_hint='auto', max_tokens=8192):
+    # Qwen first — if QWEN_URL_AGENT set and model is auto or qwen
+    if model_hint in ('auto', 'qwen') and QWEN_URL_AGENT:
+        result, used = ai_call_qwen(prompt, min(max_tokens, 4096))
+        if result:
+            return result, used
+
+    # Cloud — only if explicitly requested (claude/gemini) or auto after Qwen failed
     # Claude
     use_claude = (model_hint in ('auto', 'claude')) and CLAUDE_API_KEY
     if use_claude:
