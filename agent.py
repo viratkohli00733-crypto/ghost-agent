@@ -1,7 +1,7 @@
 """
-Ghost Agent v6.0 — Complete Site Manager
+Ghost Agent v7.0 — Complete Site Manager
 Features: deploy, execute, monitor, ask, db, shops, analytics, rollback
-Brain: Qwen Coder-3B (phone) → Claude/Gemini (fallback with permission)
+Brain: Qwen Coder-3B (phone) — offline only, no cloud (V70)
 """
 
 from flask import Flask, request, jsonify, Response, stream_with_context
@@ -19,14 +19,10 @@ STAGING_BRANCH = os.environ.get('STAGING_BRANCH',    'staging')
 RENDER_API_KEY = os.environ.get('RENDER_API_KEY',    '')
 RENDER_SERVICE = os.environ.get('RENDER_SERVICE_ID', '')   # production
 RENDER_STAGING = os.environ.get('RENDER_STAGING_ID', '')   # staging
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY',    '')
-CLAUDE_API_KEY = os.environ.get('CLAUDE_API_KEY',    '')
 DB_URL         = os.environ.get('DATABASE_URL',      '')   # PostgreSQL URL
 
 GITHUB_API = "https://api.github.com"
 RENDER_API = "https://api.render.com/v1"
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
-CLAUDE_URL = "https://api.anthropic.com/v1/messages"
 
 _pending = {}   # approval_id → pending data
 
@@ -147,71 +143,21 @@ def render_get_deploys(service_id, limit=5):
     return []
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  AI — Qwen (phone) first, Claude/Gemini only if explicitly permitted
-#  model_hint: 'qwen' | 'claude' | 'gemini' | 'auto'
-#  'auto' = try Claude first, then Gemini (cloud-only path, use after permission)
+#  AI — Qwen only (V70 — no cloud)
+#  Qwen Coder-3B runs on phone via llama-server (127.0.0.1:8080)
+#  Agent receives pre-planned files + command from Ghost app (main.py)
+#  No Gemini, No Claude — offline only
 # ══════════════════════════════════════════════════════════════════════════════
-QWEN_URL_AGENT = os.environ.get('QWEN_URL', '')   # e.g. http://phone-ip:8080/completion
 
-def ai_call_qwen(prompt, max_tokens=4096):
-    """Call Qwen Coder-3B running on phone via llama-server."""
-    if not QWEN_URL_AGENT:
-        return None, None
-    try:
-        r = requests.post(
-            QWEN_URL_AGENT,
-            json={"prompt": prompt, "n_predict": max_tokens, "temperature": 0.2,
-                  "stop": ["```\n\nTask:", "===END==="]},
-            timeout=120)
-        if r.status_code == 200:
-            content = r.json().get('content', '').strip()
-            if content:
-                return content, 'qwen'
-    except Exception as e:
-        print(f"Qwen Agent: {e}")
-    return None, None
-
-def ai_call(prompt, model_hint='auto', max_tokens=8192):
-    # Qwen first — if QWEN_URL_AGENT set and model is auto or qwen
-    if model_hint in ('auto', 'qwen') and QWEN_URL_AGENT:
-        result, used = ai_call_qwen(prompt, min(max_tokens, 4096))
-        if result:
-            return result, used
-
-    # Cloud — only if explicitly requested (claude/gemini) or auto after Qwen failed
-    # Claude
-    use_claude = (model_hint in ('auto', 'claude')) and CLAUDE_API_KEY
-    if use_claude:
-        try:
-            r = requests.post(CLAUDE_URL,
-                headers={"x-api-key": CLAUDE_API_KEY,
-                         "anthropic-version": "2023-06-01",
-                         "content-type": "application/json"},
-                json={"model": "claude-sonnet-4-20250514",
-                      "max_tokens": max_tokens,
-                      "messages": [{"role": "user", "content": prompt}]},
-                timeout=90)
-            if r.status_code == 200:
-                return r.json()['content'][0]['text'], 'claude'
-            print(f"Claude error: {r.status_code} {r.text[:200]}")
-        except Exception as e:
-            print(f"Claude: {e}")
-
-    # Gemini fallback
-    use_gemini = (model_hint in ('auto', 'gemini')) and GEMINI_API_KEY
-    if use_gemini:
-        try:
-            r = requests.post(GEMINI_URL,
-                json={"contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                      "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_tokens}},
-                timeout=90)
-            if r.status_code == 200:
-                return r.json()['candidates'][0]['content']['parts'][0]['text'], 'gemini'
-            print(f"Gemini error: {r.status_code}")
-        except Exception as e:
-            print(f"Gemini: {e}")
-
-    return None, None
+def ai_call(prompt, model_hint='auto', max_tokens=4096):
+    """
+    V70: Qwen only. model_hint ignored — always uses Qwen.
+    Returns (response_text, 'qwen') or (None, None) if unavailable.
+    Note: In V70 architecture, Qwen runs on phone. Agent receives
+    pre-processed file plans from Ghost app. This function is kept
+    for future extensibility but agent primarily uses files sent by Ghost.
+    """
+    return None, None  # Agent relies on Ghost app's Qwen for planning
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  DB HELPER
@@ -371,8 +317,6 @@ def health():
     return jsonify({
         "status":  "alive", "version": "v6",
         "pending": len(_pending),
-        "claude":  bool(CLAUDE_API_KEY),
-        "gemini":  bool(GEMINI_API_KEY),
         "render":  bool(RENDER_API_KEY),
         "staging": bool(RENDER_STAGING),
         "db":      bool(DB_URL),
@@ -594,7 +538,7 @@ def monitor():
 
 @app.route('/ask', methods=['POST'])
 def ask():
-    """Answer a question using AI. Model hint can be claude/gemini/auto."""
+    """Answer a question — V70: Qwen only via Ghost app planning."""
     if not auth(): return jsonify({"error": "Unauthorized"}), 401
     data     = request.json or {}
     question = data.get('question', '').strip()
@@ -879,8 +823,6 @@ def status():
         "repo":     GITHUB_REPO,
         "branch":   GITHUB_BRANCH,
         "staging":  STAGING_BRANCH,
-        "claude":   bool(CLAUDE_API_KEY),
-        "gemini":   bool(GEMINI_API_KEY),
         "render":   bool(RENDER_API_KEY),
         "db":       bool(DB_URL),
         "pending":  len(_pending),
