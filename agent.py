@@ -159,10 +159,36 @@ def deploy():
 
 @app.route('/approve',methods=['POST'])
 def approve():
+    """
+    Approve staging — confirms staging push only.
+    Does NOT merge to master/production.
+    Use /promote for production deploy.
+    """
     if not auth(): return jsonify({"error":"Unauthorized"}),401
     aid=(request.json or {}).get('approval_id','')
     pending=_pending.get(aid)
     if not pending: return jsonify({"error":"Not found"}),404
+    staging_url = render_url(RENDER_STAGING) or 'https://starcutters-staging.onrender.com'
+    # Keep pending — needed for promote
+    return jsonify({
+        "success":   True,
+        "message":   f"Staging confirmed, Sir. Preview at {staging_url}\nType CONFIRM PRODUCTION to go live or CANCEL to discard.",
+        "staging_url": staging_url,
+        "approval_id": aid,
+        "status":    "staging_approved"
+    })
+
+
+@app.route('/promote', methods=['POST'])
+def promote():
+    """
+    PROMOTE — merge staging → master → deploy to production.
+    Only called after explicit CONFIRM PRODUCTION from user.
+    """
+    if not auth(): return jsonify({"error":"Unauthorized"}),401
+    aid=(request.json or {}).get('approval_id','')
+    pending=_pending.get(aid)
+    if not pending: return jsonify({"error":"Not found or already promoted"}),404
     details=[]; ok,resp=gh_merge()
     if ok:
         details.append("[OK] staging → master merged")
@@ -171,9 +197,40 @@ def approve():
             details.append("[OK] Production deploy triggered" if dok else "[!] Deploy trigger failed")
     else:
         msg=resp.get('message','?') if isinstance(resp,dict) else str(resp)
-        del _pending[aid]; return jsonify({"success":False,"message":f"Merge failed: {msg}","details":[f"[X] {msg}"]})
+        del _pending[aid]
+        return jsonify({"success":False,"message":f"Merge failed: {msg}","details":[f"[X] {msg}"]})
     del _pending[aid]
-    return jsonify({"success":True,"message":"Deployed to production, Sir.","details":details})
+    return jsonify({"success":True,"message":"Deployed to production, Sir. 🚀","details":details})
+
+
+@app.route('/discard', methods=['POST'])
+def discard():
+    """
+    DISCARD — reset staging branch back to master.
+    Called when user types CANCEL after staging preview.
+    """
+    if not auth(): return jsonify({"error":"Unauthorized"}),401
+    aid=(request.json or {}).get('approval_id','')
+    if aid in _pending: del _pending[aid]
+    # Reset staging to master
+    try:
+        # Get master SHA
+        r = requests.get(
+            f"{GITHUB_API}/repos/{GITHUB_REPO}/git/refs/heads/{GITHUB_BRANCH}",
+            headers=_gh_h(), timeout=15)
+        if r.status_code == 200:
+            master_sha = r.json()['object']['sha']
+            # Force update staging to master
+            r2 = requests.patch(
+                f"{GITHUB_API}/repos/{GITHUB_REPO}/git/refs/heads/{STAGING_BRANCH}",
+                headers=_gh_h(),
+                json={"sha": master_sha, "force": True},
+                timeout=15)
+            if r2.status_code == 200:
+                return jsonify({"success":True,"message":"Staging discarded. Master is safe, Sir."})
+    except Exception as e:
+        pass
+    return jsonify({"success":True,"message":"Pending cleared. Master untouched, Sir."})
 
 @app.route('/cancel',methods=['POST'])
 def cancel():
