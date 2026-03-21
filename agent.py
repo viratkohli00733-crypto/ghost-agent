@@ -1,5 +1,5 @@
 """
-Ghost Agent v8.0 — Deploy + DB Manager
+Ghost Agent v8.1 — Deploy + DB Manager + RAG Sync
 Architecture:
   - /deploy     : Receive files → staging push → approve → production
   - /approve    : Merge staging → master → production deploy
@@ -111,7 +111,7 @@ def db_q(sql,params=None):
 
 @app.route('/health')
 def health():
-    return jsonify({"status":"alive","version":"v8","pending":len(_pending),
+    return jsonify({"status":"alive","version":"v8.1","pending":len(_pending),
                     "render":bool(RENDER_API_KEY),"staging":bool(RENDER_STAGING),"db":bool(DB_URL)})
 
 @app.route('/deploy',methods=['POST'])
@@ -125,7 +125,7 @@ def deploy():
     def gen():
         t=ts(); aid=f"deploy_{int(time.time())}"
         branch=GITHUB_BRANCH if direct else STAGING_BRANCH
-        yield sse("log",f"[{t}] [SYS] Ghost Agent v8 online, Sir.")
+        yield sse("log",f"[{t}] [SYS] Ghost Agent v8.1 online, Sir.")
         yield sse("log",f"[{t}] [GO] Pushing {len(files)} file(s) → {branch}")
         sha_map={}; errs=[]
         for fp,content in files.items():
