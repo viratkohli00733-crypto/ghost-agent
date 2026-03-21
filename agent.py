@@ -396,5 +396,26 @@ def rollback():
         return jsonify({"error":"Push failed"}),500
     except Exception as e: return jsonify({"error":str(e)}),500
 
+@app.route('/rag_sync',methods=['POST'])
+def rag_sync():
+    """Fetch all repo files and return for RAG knowledge base building."""
+    if not auth(): return jsonify({"error":"Unauthorized"}),401
+    result={}
+    exts={'.py','.html','.css','.js','.txt','.sql','.json','.md'}
+    try:
+        for fp in gh_list():
+            if os.path.splitext(fp)[1].lower() in exts:
+                content,sha=gh_get(fp)
+                if content:
+                    result[fp]=content
+        return jsonify({
+            "success": True,
+            "files":   result,
+            "count":   len(result),
+            "message": f"RAG sync: {len(result)} files fetched"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 if __name__=='__main__':
     app.run(debug=False,host='0.0.0.0',port=int(os.environ.get('PORT',5001)))
