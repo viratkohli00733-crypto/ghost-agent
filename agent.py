@@ -34,7 +34,27 @@ RENDER_STAGING = os.environ.get('RENDER_STAGING_ID', '')
 DB_URL         = os.environ.get('DATABASE_URL',      '')
 GITHUB_API     = "https://api.github.com"
 RENDER_API     = "https://api.render.com/v1"
-_pending       = {}
+PENDING_FILE   = "/tmp/ghost_pending.json"
+
+def _load_pending():
+    try:
+        if os.path.exists(PENDING_FILE):
+            with open(PENDING_FILE) as f: return json.load(f)
+    except: pass
+    return {}
+
+def _save_pending(p):
+    try:
+        with open(PENDING_FILE,'w') as f: json.dump(p,f)
+    except: pass
+
+def _get_pending(): return _load_pending()
+def _set_pending(aid, val):
+    p = _load_pending(); p[aid] = val; _save_pending(p)
+def _del_pending(aid):
+    p = _load_pending()
+    if aid in p: del p[aid]; _save_pending(p)
+def _pending_get(aid): return _load_pending().get(aid)
 
 def auth():
     s = request.headers.get('X-Ghost-Secret','') or (request.json or {}).get('secret','')
@@ -111,7 +131,7 @@ def db_q(sql,params=None):
 
 @app.route('/health')
 def health():
-    return jsonify({"status":"alive","version":"v8.1","pending":len(_pending),
+    return jsonify({"status":"alive","version":"v8.2","pending":len(_get_pending()),
                     "render":bool(RENDER_API_KEY),"staging":bool(RENDER_STAGING),"db":bool(DB_URL)})
 
 @app.route('/deploy',methods=['POST'])
@@ -146,7 +166,7 @@ def deploy():
             yield sse("log",f"[{t}] [GO] Staging deploy {'triggered' if ok else 'failed'}")
             staging_url=render_url(RENDER_STAGING)
             if staging_url: yield sse("log",f"[{t}] [INFO] Preview: {staging_url}")
-        _pending[aid]={"type":"deploy","files":files,"sha_map":sha_map,"commit_msg":commit_msg,"ts":t}
+        _set_pending(aid,{"type":"deploy","files":files,"sha_map":sha_map,"commit_msg":commit_msg,"ts":t})
         yield sse("log",f"[{t}] {'─'*36}")
         yield sse("approval_required",{
             "approval_id":aid,
@@ -166,7 +186,7 @@ def approve():
     """
     if not auth(): return jsonify({"error":"Unauthorized"}),401
     aid=(request.json or {}).get('approval_id','')
-    pending=_pending.get(aid)
+    pending=_pending_get(aid)
     if not pending: return jsonify({"error":"Not found"}),404
     staging_url = render_url(RENDER_STAGING) or 'https://starcutters-staging.onrender.com'
     # Keep pending — needed for promote
@@ -187,7 +207,7 @@ def promote():
     """
     if not auth(): return jsonify({"error":"Unauthorized"}),401
     aid=(request.json or {}).get('approval_id','')
-    pending=_pending.get(aid)
+    pending=_pending_get(aid)
     if not pending: return jsonify({"error":"Not found or already promoted"}),404
     details=[]; ok,resp=gh_merge()
     if ok:
@@ -197,9 +217,9 @@ def promote():
             details.append("[OK] Production deploy triggered" if dok else "[!] Deploy trigger failed")
     else:
         msg=resp.get('message','?') if isinstance(resp,dict) else str(resp)
-        del _pending[aid]
+        _del_pending(aid)
         return jsonify({"success":False,"message":f"Merge failed: {msg}","details":[f"[X] {msg}"]})
-    del _pending[aid]
+    _del_pending(aid)
     return jsonify({"success":True,"message":"Deployed to production, Sir. 🚀","details":details})
 
 
@@ -211,7 +231,7 @@ def discard():
     """
     if not auth(): return jsonify({"error":"Unauthorized"}),401
     aid=(request.json or {}).get('approval_id','')
-    if aid in _pending: del _pending[aid]
+    if aid in _pending: _del_pending(aid)
     # Reset staging to master
     try:
         # Get master SHA
@@ -236,7 +256,7 @@ def discard():
 def cancel():
     if not auth(): return jsonify({"error":"Unauthorized"}),401
     aid=(request.json or {}).get('approval_id','')
-    if aid in _pending: del _pending[aid]
+    if aid in _pending: _del_pending(aid)
     return jsonify({"success":True,"message":"Cancelled, Sir."})
 
 @app.route('/sync',methods=['POST'])
@@ -329,7 +349,7 @@ def shop_create():
             render_deploy(RENDER_STAGING); staging_url=render_url(RENDER_STAGING)
         _,err=db_q("INSERT INTO shops (name,subdomain,status,created_at) VALUES (%s,%s,'pending',NOW())",(name,sub))
         yield sse("log",f"[{t}] {'[OK] DB entry created' if not err else f'[!] DB: {err}'}")
-        _pending[aid]={"type":"shop_create","shop":shop,"files":tfiles,"sha_map":sha_map,"ts":t,"commit_msg":f"New shop: {name}"}
+        _set_pending(aid,{"type":"shop_create","shop":shop,"files":tfiles,"sha_map":sha_map,"ts":t,"commit_msg":f"New shop: {name}"})
         yield sse("approval_required",{
             "approval_id":aid,
             "diff":[{"filepath":fp,"success":True} for fp in tfiles],
@@ -381,9 +401,25 @@ def analytics():
 
 @app.route('/rollback',methods=['POST'])
 def rollback():
+    """
+    Rollback — either specific file or full revert.
+    If filepath given → file-level rollback.
+    If no filepath → full git revert (calls /revert logic).
+    """
     if not auth(): return jsonify({"error":"Unauthorized"}),401
-    data=request.json or {}; fp=data.get('filepath',''); back=data.get('commits_back',1)
-    if not fp: return jsonify({"error":"filepath required"}),400
+    data=request.json or {}
+    fp=data.get('filepath','')
+    back=data.get('commits_back',1)
+
+    # Full revert if no filepath
+    if not fp:
+        with app.test_request_context(
+            '/revert', method='POST',
+            json={'commits_back': back},
+            headers={'X-Ghost-Secret': AGENT_SECRET}):
+            return revert()
+
+    # File-level rollback
     try:
         r=requests.get(f"{GITHUB_API}/repos/{GITHUB_REPO}/commits?path={fp}&per_page={back+1}",headers=_gh_h(),timeout=15)
         if r.status_code!=200 or len(r.json())<back+1: return jsonify({"error":"Not enough history"}),404
@@ -392,9 +428,88 @@ def rollback():
         if fr.status_code!=200: return jsonify({"error":"Could not fetch old version"}),404
         old=base64.b64decode(fr.json()['content']).decode('utf-8')
         _,cur_sha=gh_get(fp); ok,_=gh_put(fp,old,cur_sha,f"Ghost rollback: {fp} to {old_sha[:7]}")
-        if ok: return jsonify({"success":True,"message":f"Rolled back {fp}, Sir."})
+        if ok:
+            if RENDER_SERVICE: render_deploy(RENDER_SERVICE)
+            return jsonify({"success":True,"message":f"Rolled back {fp}, Sir. Render deploying."})
         return jsonify({"error":"Push failed"}),500
     except Exception as e: return jsonify({"error":str(e)}),500
+
+@app.route('/revert', methods=['POST'])
+def revert():
+    """
+    Full git revert — reverts last commit on master.
+    Render auto-deploys after push.
+    Ghost pulls workspace after response.
+    """
+    if not auth(): return jsonify({"error":"Unauthorized"}),401
+    commits_back = (request.json or {}).get('commits_back', 1)
+    try:
+        # Get commit history
+        r = requests.get(
+            f"{GITHUB_API}/repos/{GITHUB_REPO}/commits?sha={GITHUB_BRANCH}&per_page={commits_back+1}",
+            headers=_gh_h(), timeout=15)
+        if r.status_code != 200:
+            return jsonify({"error": "Could not fetch commits"}), 500
+
+        commits = r.json()
+        if len(commits) < commits_back + 1:
+            return jsonify({"error": "Not enough commit history"}), 404
+
+        # Get target commit (the one to revert to)
+        target_commit = commits[commits_back]
+        target_sha    = target_commit['sha']
+        target_msg    = target_commit['commit']['message']
+
+        # Get all files changed in the last N commits
+        # Fetch tree of target commit
+        tree_r = requests.get(
+            f"{GITHUB_API}/repos/{GITHUB_REPO}/git/trees/{target_sha}?recursive=1",
+            headers=_gh_h(), timeout=15)
+        if tree_r.status_code != 200:
+            return jsonify({"error": "Could not fetch tree"}), 500
+
+        tree = tree_r.json().get('tree', [])
+        exts = {'.py', '.html', '.css', '.js', '.txt', '.sql', '.json', '.md'}
+        reverted = []
+        errors   = []
+
+        for item in tree:
+            fp  = item.get('path','')
+            ext = os.path.splitext(fp)[1].lower()
+            if item.get('type') != 'blob' or ext not in exts:
+                continue
+            # Fetch file content from target commit
+            fc = requests.get(
+                f"{GITHUB_API}/repos/{GITHUB_REPO}/contents/{fp}?ref={target_sha}",
+                headers=_gh_h(), timeout=15)
+            if fc.status_code != 200:
+                continue
+            old_content = base64.b64decode(fc.json()['content']).decode('utf-8', errors='ignore')
+            # Get current SHA
+            _, cur_sha = gh_get(fp)
+            ok, _ = gh_put(fp, old_content, cur_sha,
+                           f"Ghost revert: back to {target_sha[:7]} — {target_msg[:40]}")
+            if ok: reverted.append(fp)
+            else:  errors.append(fp)
+
+        if not reverted:
+            return jsonify({"error": "Nothing reverted", "errors": errors}), 500
+
+        # Trigger Render production deploy
+        if RENDER_SERVICE:
+            render_deploy(RENDER_SERVICE)
+
+        return jsonify({
+            "success":    True,
+            "reverted":   reverted,
+            "errors":     errors,
+            "target_sha": target_sha[:7],
+            "message":    f"Reverted {len(reverted)} files to {target_sha[:7]}, Sir. Render deploying now."
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route('/rag_sync',methods=['POST'])
 def rag_sync():
